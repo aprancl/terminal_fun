@@ -916,8 +916,8 @@ class TestDisableMouseEscapeSequences:
         pos_1000 = output.index("\033[?1000l")
         assert pos_1006 < pos_1003 < pos_1002 < pos_1000
 
-    def test_disable_mouse_no_sequences_when_unsupported(self):
-        """When mouse was never supported, no cleanup sequences are written."""
+    def test_disable_mouse_always_sends_cleanup(self):
+        """Cleanup sequences are always written to restore terminal state."""
         handler = InputHandler(stdscr=None)
         handler.mouse_supported = False
 
@@ -926,7 +926,9 @@ class TestDisableMouseEscapeSequences:
             handler.disable_mouse()
 
         output = fake_stdout.getvalue()
-        assert output == ""
+        # disable_mouse always sends cleanup sequences now
+        assert "\033[?1006l" in output
+        assert "\033[?1000l" in output
 
     def test_disable_mouse_called_in_finally_block(self):
         """Verify the display loop calls disable_mouse in its finally block."""
@@ -1045,7 +1047,8 @@ class TestKittyProtocolNegotiation:
             result = handler.enable_mouse()
 
         assert handler._kitty_protocol_disabled is False
-        assert result is False
+        # Known terminal fallback still marks mouse as supported
+        assert result is True
 
     def test_disable_mouse_kitty_restore_failure(self):
         """If stdout.write fails during Kitty restore, disable_mouse does not crash."""

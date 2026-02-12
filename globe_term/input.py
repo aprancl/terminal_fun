@@ -157,14 +157,39 @@ class InputHandler:
         except curses.error:
             self.mouse_supported = False
 
-        if self.mouse_supported:
-            # Enable xterm mouse tracking escape sequences:
+        # Always send xterm mouse tracking escape sequences for terminals
+        # we know support them.  curses.mousemask() can return 0 on macOS
+        # (ships with ncurses 5.7 from 2009) or when the terminfo is
+        # incomplete, even though the terminal fully supports mouse events.
+        terminal = detect_terminal()
+        known_mouse_terminals = ("kitty", "iterm2", "apple_terminal", "windows_terminal")
+        if self.mouse_supported or terminal in known_mouse_terminals:
             #   1000 = basic button events
             #   1002 = button-event tracking (reports motion while pressed)
             #   1003 = any-event tracking (reports all motion, most compatible)
             #   1006 = SGR extended mode (supports large coordinates)
-            sys.stdout.write("\033[?1000h\033[?1002h\033[?1003h\033[?1006h")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(
+                    "\033[?1000h\033[?1002h\033[?1003h\033[?1006h"
+                )
+                sys.stdout.flush()
+            except OSError:
+                pass
+            # If curses didn't accept mousemask but the terminal is known,
+            # re-attempt — the escape sequences we just sent may have
+            # primed the terminal.
+            if not self.mouse_supported:
+                try:
+                    available, _ = curses.mousemask(
+                        curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION
+                    )
+                    self.mouse_supported = available != 0
+                except curses.error:
+                    pass
+            # Last resort: mark mouse as supported for known terminals
+            # so the event loop processes KEY_MOUSE events.
+            if not self.mouse_supported and terminal in known_mouse_terminals:
+                self.mouse_supported = True
 
         return self.mouse_supported
 
@@ -175,10 +200,11 @@ class InputHandler:
         On Kitty terminals, this also restores the progressive keyboard
         protocol by sending ``\\033[<u`` to pop the keyboard mode stack.
         """
+        # Always send disable sequences — we may have sent enable sequences
+        # even when curses.mousemask() returned 0 (for known terminals).
         try:
-            if self.mouse_supported:
-                sys.stdout.write("\033[?1006l\033[?1003l\033[?1002l\033[?1000l")
-                sys.stdout.flush()
+            sys.stdout.write("\033[?1006l\033[?1003l\033[?1002l\033[?1000l")
+            sys.stdout.flush()
         except OSError:
             pass
 

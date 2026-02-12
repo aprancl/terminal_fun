@@ -188,6 +188,9 @@ class _FakeScreen:
     def nodelay(self, flag: bool) -> None:
         pass
 
+    def timeout(self, ms: int) -> None:
+        pass
+
     def keypad(self, flag: bool) -> None:
         pass
 

@@ -283,8 +283,19 @@ class Renderer:
         except curses.error:
             pass  # some terminals don't support cursor visibility
 
-        self._stdscr.nodelay(True)   # non-blocking getch
+        # Use timeout instead of nodelay so curses has time to assemble
+        # multi-byte escape sequences (mouse events, arrow keys, etc.).
+        # 33ms ≈ one frame at 30 FPS — keeps the loop responsive while
+        # giving ncurses enough time to read escape sequence bytes.
+        self._stdscr.timeout(33)
         self._stdscr.keypad(True)
+
+        # Reduce ESCDELAY so curses resolves ambiguous escape sequences
+        # quickly (default is often 1000ms which adds visible input lag).
+        try:
+            curses.set_escdelay(25)
+        except (curses.error, AttributeError):
+            pass  # older ncurses may not expose set_escdelay
 
         if not self._force_monochrome:
             try:

@@ -35,6 +35,7 @@ from globe_term.utils import (
     detect_color_count,
     detect_color_support,
     detect_mouse_support,
+    detect_terminal,
     detect_unicode_support,
     is_terminal,
 )
@@ -624,6 +625,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     argv : sequence of str or None
         Command-line arguments.  When ``None``, reads from ``sys.argv``.
     """
+    import os
+
     config = parse_args(argv)
 
     # Check for pipe / non-terminal — cannot run curses in a pipe
@@ -634,6 +637,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Kitty sets TERM=xterm-kitty, but macOS ships with ncurses 5.7 (2009)
+    # which doesn't have the xterm-kitty terminfo entry.  Without it,
+    # curses falls back to a degraded mode where getch() can't parse
+    # escape sequences properly — breaking ALL input (keyboard + mouse).
+    # Override to xterm-256color which is universally supported.
+    _original_term = os.environ.get("TERM", "")
+    if detect_terminal() == "kitty" and "kitty" in _original_term.lower():
+        os.environ["TERM"] = "xterm-256color"
 
     # Informational: warn if mouse not supported
     if not detect_mouse_support():
@@ -647,3 +659,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         curses.wrapper(lambda stdscr: _display_loop(stdscr, config))
     except KeyboardInterrupt:
         pass  # Clean exit on Ctrl-C
+    finally:
+        # Restore original TERM so we don't affect the user's shell
+        if _original_term:
+            os.environ["TERM"] = _original_term
