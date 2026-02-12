@@ -136,8 +136,9 @@ class InputHandler:
             # Enable xterm mouse tracking escape sequences:
             #   1000 = basic button events
             #   1002 = button-event tracking (reports motion while pressed)
+            #   1003 = any-event tracking (reports all motion, most compatible)
             #   1006 = SGR extended mode (supports large coordinates)
-            sys.stdout.write("\033[?1000h\033[?1002h\033[?1006h")
+            sys.stdout.write("\033[?1000h\033[?1002h\033[?1003h\033[?1006h")
             sys.stdout.flush()
 
         return self.mouse_supported
@@ -148,7 +149,7 @@ class InputHandler:
         Call this during cleanup to restore the terminal to normal state.
         """
         if self.mouse_supported:
-            sys.stdout.write("\033[?1006l\033[?1002l\033[?1000l")
+            sys.stdout.write("\033[?1006l\033[?1003l\033[?1002l\033[?1000l")
             sys.stdout.flush()
 
     # -- Idle tracking --------------------------------------------------------
@@ -217,7 +218,11 @@ class InputHandler:
             return None
 
         # ---- Motion while button held (drag) --------------------------------
-        if self._button_pressed and (bstate & _report_mouse_position_mask()):
+        # Detect motion by position change rather than relying on
+        # REPORT_MOUSE_POSITION bstate, which many terminals never set.
+        # Exclude release/click events so they fall through to their handlers.
+        is_release = bool(bstate & (_button1_released_mask() | _button1_clicked_mask()))
+        if self._button_pressed and not is_release and (mx != self._last_x or my != self._last_y):
             dx = mx - self._last_x
             dy = my - self._last_y
 

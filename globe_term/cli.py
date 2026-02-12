@@ -88,6 +88,16 @@ MAX_ROTATION_SPEED = 0.15  # ~8.6 degrees per event
 SCROLL_ZOOM_STEP = 0.1
 
 # ---------------------------------------------------------------------------
+# Keyboard rotation
+# ---------------------------------------------------------------------------
+
+# Rotation per arrow key press (radians). ~5 degrees per press.
+KEY_ROTATION_STEP = math.radians(5)
+
+# Zoom delta per +/- key press.
+KEY_ZOOM_STEP = 0.15
+
+# ---------------------------------------------------------------------------
 # Frame timing
 # ---------------------------------------------------------------------------
 
@@ -446,6 +456,32 @@ def _display_loop(stdscr: Any, config: Optional[CLIConfig] = None) -> None:
             if key == curses.KEY_RESIZE:
                 if debouncer.should_handle():
                     _handle_resize(renderer, globe, adapter)
+
+            # --- Keyboard controls ---
+            if key == curses.KEY_LEFT:
+                globe.rotate(-KEY_ROTATION_STEP, 0)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
+            elif key == curses.KEY_RIGHT:
+                globe.rotate(KEY_ROTATION_STEP, 0)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
+            elif key == curses.KEY_UP:
+                globe.rotate(0, -KEY_ROTATION_STEP)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
+            elif key == curses.KEY_DOWN:
+                globe.rotate(0, KEY_ROTATION_STEP)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
+            elif key in (ord("+"), ord("=")):
+                globe.adjust_zoom(KEY_ZOOM_STEP)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
+            elif key in (ord("-"), ord("_")):
+                globe.adjust_zoom(-KEY_ZOOM_STEP)
+                input_handler._last_event_time = time.monotonic()
+                needs_redraw = True
 
             # Process mouse input events
             event = input_handler.process_event(key)
