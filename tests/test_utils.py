@@ -22,6 +22,7 @@ from globe_term.utils import (
     detect_color_count,
     detect_color_support,
     detect_mouse_support,
+    detect_terminal,
     detect_unicode_support,
     get_terminal_size,
     is_terminal,
@@ -245,6 +246,107 @@ class TestDetectMouseSupport:
         with mock.patch.dict(os.environ, env, clear=False):
             with mock.patch("globe_term.utils.is_terminal", return_value=True):
                 assert detect_mouse_support() is True
+
+
+# ---------------------------------------------------------------------------
+# detect_terminal
+# ---------------------------------------------------------------------------
+
+class TestDetectTerminal:
+    """Tests for detect_terminal() — terminal emulator identification."""
+
+    def _clean_env(self) -> dict[str, str]:
+        """Return env overrides that clear all detection-relevant vars."""
+        return {
+            "TERM_PROGRAM": "",
+            "TERM": "",
+            "WT_SESSION": "",
+        }
+
+    def test_kitty_via_term_program(self) -> None:
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "kitty"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "kitty"
+
+    def test_kitty_via_term_env(self) -> None:
+        """Kitty inside tmux: TERM_PROGRAM may be overridden but TERM=xterm-kitty."""
+        env = self._clean_env()
+        env["TERM"] = "xterm-kitty"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "kitty"
+
+    def test_kitty_term_program_takes_priority(self) -> None:
+        """When both TERM_PROGRAM=kitty and TERM=xterm-kitty, still returns kitty."""
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "kitty"
+        env["TERM"] = "xterm-kitty"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "kitty"
+
+    def test_iterm2_via_term_program(self) -> None:
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "iTerm.app"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "iterm2"
+
+    def test_apple_terminal_via_term_program(self) -> None:
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "Apple_Terminal"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "apple_terminal"
+
+    def test_windows_terminal_via_wt_session(self) -> None:
+        env = self._clean_env()
+        env["WT_SESSION"] = "some-guid-value"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "windows_terminal"
+
+    def test_unknown_when_no_env_vars_match(self) -> None:
+        env = self._clean_env()
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "unknown"
+
+    def test_unknown_with_generic_xterm(self) -> None:
+        """A plain xterm TERM without TERM_PROGRAM is unknown."""
+        env = self._clean_env()
+        env["TERM"] = "xterm-256color"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "unknown"
+
+    def test_missing_env_vars_no_keyerror(self) -> None:
+        """When env vars are completely absent, no KeyError is raised."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            result = detect_terminal()
+            assert isinstance(result, str)
+            assert result == "unknown"
+
+    def test_case_insensitive_term_program(self) -> None:
+        """TERM_PROGRAM matching is case-insensitive."""
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "KITTY"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "kitty"
+
+    def test_iterm2_case_insensitive(self) -> None:
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "iterm.app"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "iterm2"
+
+    def test_apple_terminal_case_insensitive(self) -> None:
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "apple_terminal"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "apple_terminal"
+
+    def test_kitty_term_program_prioritized_over_wt_session(self) -> None:
+        """TERM_PROGRAM=kitty should win over WT_SESSION being set."""
+        env = self._clean_env()
+        env["TERM_PROGRAM"] = "kitty"
+        env["WT_SESSION"] = "some-session"
+        with mock.patch.dict(os.environ, env, clear=False):
+            assert detect_terminal() == "kitty"
 
 
 # ---------------------------------------------------------------------------

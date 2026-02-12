@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
+from globe_term.utils import detect_terminal
+
 
 # ---------------------------------------------------------------------------
 # Action types
@@ -107,6 +109,9 @@ class InputHandler:
         # Whether the terminal supports mouse events
         self.mouse_supported: bool = False
 
+        # Whether we disabled Kitty's progressive keyboard protocol
+        self._kitty_protocol_disabled: bool = False
+
         # Enable mouse reporting automatically if a screen was provided
         if stdscr is not None:
             self.enable_mouse()
@@ -121,9 +126,29 @@ class InputHandler:
         need these sequences to report drag/motion events — the curses
         mask alone is not sufficient.
 
+        On Kitty terminals, the progressive keyboard protocol (``CSI u``)
+        encodes key events in a format curses cannot parse.  This method
+        sends ``\\033[>0u`` to push the current keyboard mode and switch
+        to legacy xterm mode (mode 0), restoring compatibility with
+        ``getch()``.
+
         Returns:
             ``True`` if the terminal accepted mouse events, ``False`` otherwise.
         """
+        # Kitty keyboard protocol negotiation — must happen before curses
+        # mouse setup so that key events are already in legacy mode when
+        # getch() starts reading them.
+        if detect_terminal() == "kitty":
+            try:
+                # Push current keyboard mode and set to legacy (mode 0).
+                # See https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+                sys.stdout.write("\033[>0u")
+                sys.stdout.flush()
+                self._kitty_protocol_disabled = True
+            except OSError:
+                # stdout write failed — continue without protocol change.
+                self._kitty_protocol_disabled = False
+
         try:
             available, _ = curses.mousemask(
                 curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION
@@ -147,10 +172,25 @@ class InputHandler:
         """Disable mouse tracking escape sequences.
 
         Call this during cleanup to restore the terminal to normal state.
+        On Kitty terminals, this also restores the progressive keyboard
+        protocol by sending ``\\033[<u`` to pop the keyboard mode stack.
         """
-        if self.mouse_supported:
-            sys.stdout.write("\033[?1006l\033[?1003l\033[?1002l\033[?1000l")
-            sys.stdout.flush()
+        try:
+            if self.mouse_supported:
+                sys.stdout.write("\033[?1006l\033[?1003l\033[?1002l\033[?1000l")
+                sys.stdout.flush()
+        except OSError:
+            pass
+
+        # Restore Kitty keyboard protocol (pop the mode stack).
+        if self._kitty_protocol_disabled:
+            try:
+                sys.stdout.write("\033[<u")
+                sys.stdout.flush()
+                self._kitty_protocol_disabled = False
+            except OSError:
+                # Best-effort cleanup — don't crash on write failure.
+                pass
 
     # -- Idle tracking --------------------------------------------------------
 
@@ -162,6 +202,16 @@ class InputHandler:
     def idle_seconds(self) -> float:
         """Seconds elapsed since the last input event."""
         return time.monotonic() - self._last_event_time
+
+    def reset_idle(self) -> None:
+        """Reset the idle timer to the current time.
+
+        Call this when a keyboard event (or any non-mouse input) is
+        processed to indicate that the user is actively interacting.
+        This prevents auto-rotation from resuming while the user is
+        pressing keys.
+        """
+        self._last_event_time = time.monotonic()
 
     # -- Event processing -----------------------------------------------------
 
@@ -302,18 +352,19 @@ def _button1_clicked_mask() -> int:
 
 def _scroll_up_mask() -> int:
     # BUTTON4_PRESSED is the traditional curses constant for scroll-up.
-    # Some ncurses builds also provide BUTTON_SCROLL_UP.
-    return getattr(curses, "BUTTON4_PRESSED", 0x80000)
+    # Some terminals report scroll as BUTTON4_CLICKED instead.  OR both
+    # together so scroll-up is detected regardless of encoding style.
+    pressed = getattr(curses, "BUTTON4_PRESSED", 0x10000)
+    clicked = getattr(curses, "BUTTON4_CLICKED", 0x20000)
+    return pressed | clicked
 
 
 def _scroll_down_mask() -> int:
-    # BUTTON5_PRESSED may not exist on older ncurses.  Fall back to a
-    # commonly used value (0x200000) and also check REPORT_MOUSE_POSITION
-    # as some systems map scroll-down there.
-    if hasattr(curses, "BUTTON5_PRESSED"):
-        return curses.BUTTON5_PRESSED
-    # Fallback value used by many ncurses builds
-    return 0x200000
+    # BUTTON5_PRESSED is the standard scroll-down constant.  Some terminals
+    # report it as BUTTON5_CLICKED instead, so OR both together.
+    pressed = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+    clicked = getattr(curses, "BUTTON5_CLICKED", 0x400000)
+    return pressed | clicked
 
 
 def _report_mouse_position_mask() -> int:

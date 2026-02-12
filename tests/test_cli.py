@@ -16,6 +16,7 @@ from __future__ import annotations
 import curses
 import math
 import sys
+import time
 from unittest import mock
 
 import pytest
@@ -25,14 +26,20 @@ from globe_term.cli import (
     CLIConfig,
     DEFAULT_DRAG_SENSITIVITY,
     DragRotator,
+    KEY_ROTATION_STEP,
+    KEY_ZOOM_STEP,
     MAX_ROTATION_SPEED,
+    MOUSE_HINT_DURATION,
+    MOUSE_HINT_MESSAGE,
     SCROLL_ZOOM_STEP,
     SIZE_ZOOM_MAP,
     VALID_SIZES,
     _ThemeAdapter,
     _build_projection,
     _choose_render_mode,
+    _clear_mouse_hint,
     _display_loop,
+    _show_mouse_hint,
     _validate_theme,
     main,
     parse_args,
@@ -879,3 +886,589 @@ class TestScrollToZoomIntegration:
             f"Zoomed-in globe ({len(points_large)} points) should have more "
             f"projection points than zoomed-out ({len(points_small)} points)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Keyboard control constants
+# ---------------------------------------------------------------------------
+
+
+class TestKeyboardConstants:
+    """Verify keyboard control constants are properly defined."""
+
+    def test_key_rotation_step_is_positive(self) -> None:
+        """KEY_ROTATION_STEP must be a positive radian value."""
+        assert KEY_ROTATION_STEP > 0
+
+    def test_key_rotation_step_is_reasonable(self) -> None:
+        """KEY_ROTATION_STEP should be a small increment (1-15 degrees)."""
+        degrees = math.degrees(KEY_ROTATION_STEP)
+        assert 1.0 <= degrees <= 15.0
+
+    def test_key_zoom_step_is_positive(self) -> None:
+        """KEY_ZOOM_STEP must be a positive number."""
+        assert KEY_ZOOM_STEP > 0
+
+    def test_key_zoom_step_is_reasonable(self) -> None:
+        """KEY_ZOOM_STEP should be a small increment (between 0.01 and 1.0)."""
+        assert 0.01 <= KEY_ZOOM_STEP <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Keyboard controls: arrow key rotation
+# ---------------------------------------------------------------------------
+
+
+def _make_display_loop_mocks():
+    """Create mocks for both renderer and cli curses modules with full key support."""
+    renderer_mock = mock.MagicMock()
+    renderer_mock.COLOR_PAIRS = 256
+    renderer_mock.color_pair.return_value = 0
+    renderer_mock.has_colors.return_value = True
+    renderer_mock.A_BOLD = 0
+    renderer_mock.error = curses.error
+    renderer_mock.start_color.return_value = None
+    renderer_mock.use_default_colors.return_value = None
+    renderer_mock.curs_set.return_value = None
+    renderer_mock.init_pair.return_value = None
+    renderer_mock.doupdate.return_value = None
+    renderer_mock.napms.return_value = None
+    renderer_mock.KEY_RESIZE = curses.KEY_RESIZE
+
+    cli_mock = mock.MagicMock()
+    cli_mock.error = curses.error
+    cli_mock.KEY_RESIZE = curses.KEY_RESIZE
+    cli_mock.KEY_LEFT = curses.KEY_LEFT
+    cli_mock.KEY_RIGHT = curses.KEY_RIGHT
+    cli_mock.KEY_UP = curses.KEY_UP
+    cli_mock.KEY_DOWN = curses.KEY_DOWN
+
+    return renderer_mock, cli_mock
+
+
+def _run_display_loop_with_keys(*keys: int) -> Globe:
+    """Run _display_loop with the given key sequence and return the Globe.
+
+    Patches Globe and InputHandler to capture calls, then runs the loop
+    with the provided keys followed by 'q' to exit.
+
+    Returns the Globe instance used by the display loop, which can be
+    inspected for rotation and zoom changes.
+    """
+    screen = _FakeScreen(40, 80)
+    screen.queue_keys(*keys, ord("q"))
+
+    renderer_mock, cli_mock = _make_display_loop_mocks()
+    captured_globe = None
+
+    original_globe_init = Globe.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        nonlocal captured_globe
+        original_globe_init(self, *args, **kwargs)
+        captured_globe = self
+
+    with mock.patch("globe_term.renderer.curses", renderer_mock), \
+         mock.patch("globe_term.cli.curses", cli_mock), \
+         mock.patch.object(Globe, "__init__", capturing_init):
+        _display_loop(screen)
+
+    assert captured_globe is not None, "Globe was not created during display loop"
+    return captured_globe
+
+
+class TestArrowKeyRotation:
+    """Verify arrow keys rotate the globe correctly."""
+
+    def test_left_arrow_rotates_globe_left(self) -> None:
+        """Left arrow key rotates globe in the negative Y direction."""
+        globe = _run_display_loop_with_keys(curses.KEY_LEFT)
+        # Left arrow: globe.rotate(-KEY_ROTATION_STEP, 0)
+        # Starting rotation_y is 0, so after one left press it should be negative
+        assert globe.rotation_y == pytest.approx(-KEY_ROTATION_STEP)
+
+    def test_right_arrow_rotates_globe_right(self) -> None:
+        """Right arrow key rotates globe in the positive Y direction."""
+        globe = _run_display_loop_with_keys(curses.KEY_RIGHT)
+        assert globe.rotation_y == pytest.approx(KEY_ROTATION_STEP)
+
+    def test_up_arrow_tilts_globe_up(self) -> None:
+        """Up arrow key tilts globe upward (negative X rotation)."""
+        globe = _run_display_loop_with_keys(curses.KEY_UP)
+        # Starting rotation_x is math.radians(-15), up adds -KEY_ROTATION_STEP
+        expected_x = math.radians(-15) - KEY_ROTATION_STEP
+        assert globe.rotation_x == pytest.approx(expected_x)
+
+    def test_down_arrow_tilts_globe_down(self) -> None:
+        """Down arrow key tilts globe downward (positive X rotation)."""
+        globe = _run_display_loop_with_keys(curses.KEY_DOWN)
+        expected_x = math.radians(-15) + KEY_ROTATION_STEP
+        assert globe.rotation_x == pytest.approx(expected_x)
+
+    def test_multiple_left_arrows_accumulate(self) -> None:
+        """Multiple left arrow presses accumulate rotation."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_LEFT, curses.KEY_LEFT, curses.KEY_LEFT
+        )
+        assert globe.rotation_y == pytest.approx(-3 * KEY_ROTATION_STEP)
+
+    def test_multiple_right_arrows_accumulate(self) -> None:
+        """Multiple right arrow presses accumulate rotation."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_RIGHT, curses.KEY_RIGHT
+        )
+        assert globe.rotation_y == pytest.approx(2 * KEY_ROTATION_STEP)
+
+    def test_left_then_right_cancels_out(self) -> None:
+        """Left followed by right returns to original Y rotation."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_LEFT, curses.KEY_RIGHT
+        )
+        assert globe.rotation_y == pytest.approx(0.0)
+
+    def test_up_then_down_cancels_out(self) -> None:
+        """Up followed by down returns to original X rotation."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_UP, curses.KEY_DOWN
+        )
+        expected_x = math.radians(-15)
+        assert globe.rotation_x == pytest.approx(expected_x)
+
+    def test_diagonal_key_combination(self) -> None:
+        """Pressing both horizontal and vertical arrows moves diagonally."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_LEFT, curses.KEY_UP
+        )
+        assert globe.rotation_y == pytest.approx(-KEY_ROTATION_STEP)
+        expected_x = math.radians(-15) - KEY_ROTATION_STEP
+        assert globe.rotation_x == pytest.approx(expected_x)
+
+
+# ---------------------------------------------------------------------------
+# Keyboard controls: +/- zoom
+# ---------------------------------------------------------------------------
+
+
+class TestZoomKeys:
+    """Verify +/- and =/_ keys zoom the globe."""
+
+    def test_plus_zooms_in(self) -> None:
+        """+ key increases zoom level."""
+        globe = _run_display_loop_with_keys(ord("+"))
+        assert globe.zoom == pytest.approx(1.0 + KEY_ZOOM_STEP)
+
+    def test_minus_zooms_out(self) -> None:
+        """- key decreases zoom level."""
+        globe = _run_display_loop_with_keys(ord("-"))
+        assert globe.zoom == pytest.approx(1.0 - KEY_ZOOM_STEP)
+
+    def test_equals_alias_zooms_in(self) -> None:
+        """= key (unshifted +) also zooms in."""
+        globe = _run_display_loop_with_keys(ord("="))
+        assert globe.zoom == pytest.approx(1.0 + KEY_ZOOM_STEP)
+
+    def test_underscore_alias_zooms_out(self) -> None:
+        """_ key (shifted -) also zooms out."""
+        globe = _run_display_loop_with_keys(ord("_"))
+        assert globe.zoom == pytest.approx(1.0 - KEY_ZOOM_STEP)
+
+    def test_multiple_zoom_in_accumulates(self) -> None:
+        """Multiple + presses accumulate zoom increase."""
+        globe = _run_display_loop_with_keys(ord("+"), ord("+"), ord("+"))
+        assert globe.zoom == pytest.approx(1.0 + 3 * KEY_ZOOM_STEP)
+
+    def test_multiple_zoom_out_accumulates(self) -> None:
+        """Multiple - presses accumulate zoom decrease."""
+        globe = _run_display_loop_with_keys(ord("-"), ord("-"))
+        assert globe.zoom == pytest.approx(1.0 - 2 * KEY_ZOOM_STEP)
+
+    def test_zoom_in_then_out_returns_to_original(self) -> None:
+        """+ followed by - returns to original zoom level."""
+        globe = _run_display_loop_with_keys(ord("+"), ord("-"))
+        assert globe.zoom == pytest.approx(1.0)
+
+    def test_mixed_zoom_aliases(self) -> None:
+        """Mixing + and = for zoom in produces the same result."""
+        globe = _run_display_loop_with_keys(ord("+"), ord("="))
+        assert globe.zoom == pytest.approx(1.0 + 2 * KEY_ZOOM_STEP)
+
+    def test_mixed_zoom_out_aliases(self) -> None:
+        """Mixing - and _ for zoom out produces the same result."""
+        globe = _run_display_loop_with_keys(ord("-"), ord("_"))
+        assert globe.zoom == pytest.approx(1.0 - 2 * KEY_ZOOM_STEP)
+
+
+# ---------------------------------------------------------------------------
+# Keyboard controls: quit keys
+# ---------------------------------------------------------------------------
+
+
+class TestQuitKeys:
+    """Verify q and Q both quit the application."""
+
+    def test_lowercase_q_quits(self) -> None:
+        """Pressing 'q' exits the display loop."""
+        screen = _FakeScreen(40, 80)
+        screen.queue_keys(ord("q"))
+
+        renderer_mock, cli_mock = _make_display_loop_mocks()
+
+        with mock.patch("globe_term.renderer.curses", renderer_mock), \
+             mock.patch("globe_term.cli.curses", cli_mock):
+            # Should not hang or raise
+            _display_loop(screen)
+
+    def test_uppercase_q_quits(self) -> None:
+        """Pressing 'Q' exits the display loop."""
+        screen = _FakeScreen(40, 80)
+        screen.queue_keys(ord("Q"))
+
+        renderer_mock, cli_mock = _make_display_loop_mocks()
+
+        with mock.patch("globe_term.renderer.curses", renderer_mock), \
+             mock.patch("globe_term.cli.curses", cli_mock):
+            _display_loop(screen)
+
+    def test_q_after_keyboard_input_quits(self) -> None:
+        """Pressing q after some arrow keys still exits cleanly."""
+        screen = _FakeScreen(40, 80)
+        screen.queue_keys(curses.KEY_LEFT, curses.KEY_UP, ord("+"), ord("q"))
+
+        renderer_mock, cli_mock = _make_display_loop_mocks()
+
+        with mock.patch("globe_term.renderer.curses", renderer_mock), \
+             mock.patch("globe_term.cli.curses", cli_mock):
+            _display_loop(screen)
+
+
+# ---------------------------------------------------------------------------
+# Keyboard controls: idle timer reset
+# ---------------------------------------------------------------------------
+
+
+class TestKeyboardIdleTimerReset:
+    """Verify that key presses reset the idle timer on the InputHandler."""
+
+    def _run_with_idle_check(self, *keys: int) -> float:
+        """Run display loop with keys and return idle time after last key.
+
+        Sets up the InputHandler with an old last_event_time, then sends
+        the key sequence. After the loop exits, checks that the idle time
+        was reset by the key press.
+        """
+        from globe_term.input import InputHandler
+
+        screen = _FakeScreen(40, 80)
+        screen.queue_keys(*keys, ord("q"))
+
+        renderer_mock, cli_mock = _make_display_loop_mocks()
+        captured_handler = None
+
+        original_init = InputHandler.__init__
+
+        def capturing_init(self, *args, **kwargs):
+            nonlocal captured_handler
+            original_init(self, *args, **kwargs)
+            captured_handler = self
+
+        with mock.patch("globe_term.renderer.curses", renderer_mock), \
+             mock.patch("globe_term.cli.curses", cli_mock), \
+             mock.patch.object(InputHandler, "__init__", capturing_init):
+            _display_loop(screen)
+
+        assert captured_handler is not None
+        return captured_handler.idle_seconds()
+
+    def test_arrow_key_resets_idle(self) -> None:
+        """Arrow key press should reset the idle timer."""
+        idle = self._run_with_idle_check(curses.KEY_LEFT)
+        # The idle time should be very small since we just pressed a key
+        assert idle < 1.0
+
+    def test_zoom_key_resets_idle(self) -> None:
+        """+ key press should reset the idle timer."""
+        idle = self._run_with_idle_check(ord("+"))
+        assert idle < 1.0
+
+    def test_minus_key_resets_idle(self) -> None:
+        """- key press should reset the idle timer."""
+        idle = self._run_with_idle_check(ord("-"))
+        assert idle < 1.0
+
+    def test_equals_alias_resets_idle(self) -> None:
+        """= key press should reset the idle timer."""
+        idle = self._run_with_idle_check(ord("="))
+        assert idle < 1.0
+
+    def test_underscore_alias_resets_idle(self) -> None:
+        """_ key press should reset the idle timer."""
+        idle = self._run_with_idle_check(ord("_"))
+        assert idle < 1.0
+
+    def test_all_arrow_keys_reset_idle(self) -> None:
+        """All four arrow keys should reset the idle timer."""
+        for key in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN):
+            idle = self._run_with_idle_check(key)
+            assert idle < 1.0, f"Arrow key {key} did not reset idle timer"
+
+
+# ---------------------------------------------------------------------------
+# Keyboard controls: edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestKeyboardEdgeCases:
+    """Edge cases for keyboard handling in the display loop."""
+
+    def test_unrecognized_key_ignored(self) -> None:
+        """Pressing an unrecognized key does not crash or change globe state."""
+        # 'x' is not a recognized control key
+        globe = _run_display_loop_with_keys(ord("x"))
+        # Globe should be at initial state (no rotation change, default zoom)
+        assert globe.rotation_y == pytest.approx(0.0)
+        assert globe.zoom == pytest.approx(1.0)
+
+    def test_rapid_key_succession(self) -> None:
+        """Many keys pressed in rapid succession are handled correctly."""
+        keys = [curses.KEY_LEFT] * 10 + [curses.KEY_RIGHT] * 5
+        globe = _run_display_loop_with_keys(*keys)
+        # Net: 10 left - 5 right = 5 left
+        assert globe.rotation_y == pytest.approx(-5 * KEY_ROTATION_STEP)
+
+    def test_mixed_rotation_and_zoom(self) -> None:
+        """Rotation and zoom keys can be intermixed."""
+        globe = _run_display_loop_with_keys(
+            curses.KEY_LEFT, ord("+"), curses.KEY_UP, ord("-")
+        )
+        assert globe.rotation_y == pytest.approx(-KEY_ROTATION_STEP)
+        expected_x = math.radians(-15) - KEY_ROTATION_STEP
+        assert globe.rotation_x == pytest.approx(expected_x)
+        # Zoom: +1 then -1 = net 0
+        assert globe.zoom == pytest.approx(1.0)
+
+    def test_no_key_input_no_crash(self) -> None:
+        """Display loop with no keys (just q) runs fine."""
+        globe = _run_display_loop_with_keys()
+        # No keys pressed, so defaults
+        assert globe.rotation_y == pytest.approx(0.0)
+        assert globe.zoom == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# Mouse diagnostic hint: _show_mouse_hint / _clear_mouse_hint
+# ---------------------------------------------------------------------------
+
+
+class TestShowMouseHint:
+    """Unit tests for _show_mouse_hint."""
+
+    def test_displays_message_on_bottom_row(self) -> None:
+        """Hint is rendered on the last row of the screen."""
+        screen = _FakeScreen(40, 80)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _show_mouse_hint(screen, 40, 80)
+
+        assert len(calls) == 1
+        y, x, msg = calls[0]
+        assert y == 39  # bottom row (0-indexed)
+        assert x == 0
+        assert msg == MOUSE_HINT_MESSAGE
+
+    def test_truncates_on_narrow_terminal(self) -> None:
+        """Hint is truncated when terminal is narrower than message length."""
+        screen = _FakeScreen(10, 20)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _show_mouse_hint(screen, 10, 20)
+
+        assert len(calls) == 1
+        _, _, msg = calls[0]
+        # cols=20, max_len=19 (cols-1), so message is truncated to 19 chars
+        assert len(msg) == 19
+        assert msg == MOUSE_HINT_MESSAGE[:19]
+
+    def test_does_nothing_on_zero_rows(self) -> None:
+        """No crash or addstr call when rows is 0."""
+        screen = _FakeScreen(0, 80)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _show_mouse_hint(screen, 0, 80)
+
+        assert len(calls) == 0
+
+    def test_does_nothing_on_zero_cols(self) -> None:
+        """No crash or addstr call when cols is 0."""
+        screen = _FakeScreen(40, 0)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _show_mouse_hint(screen, 40, 0)
+
+        assert len(calls) == 0
+
+    def test_survives_addstr_error(self) -> None:
+        """curses.error in addstr does not propagate."""
+        screen = _FakeScreen(40, 80)
+
+        def raising_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            raise curses.error("addstr failed")
+
+        screen.addstr = raising_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            # Should not raise
+            _show_mouse_hint(screen, 40, 80)
+
+
+class TestClearMouseHint:
+    """Unit tests for _clear_mouse_hint."""
+
+    def test_clears_with_spaces(self) -> None:
+        """Hint area is overwritten with spaces."""
+        screen = _FakeScreen(40, 80)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _clear_mouse_hint(screen, 40, 80)
+
+        assert len(calls) == 1
+        y, x, blanks = calls[0]
+        assert y == 39
+        assert x == 0
+        assert blanks == " " * len(MOUSE_HINT_MESSAGE)
+
+    def test_truncates_blanks_on_narrow_terminal(self) -> None:
+        """Blank overwrite is truncated to fit terminal width."""
+        screen = _FakeScreen(10, 20)
+        calls: list[tuple[int, int, str]] = []
+
+        def capture_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            calls.append((y, x, s))
+
+        screen.addstr = capture_addstr  # type: ignore[assignment]
+
+        with mock.patch("globe_term.cli.curses") as mock_curses:
+            mock_curses.error = curses.error
+            _clear_mouse_hint(screen, 10, 20)
+
+        assert len(calls) == 1
+        _, _, blanks = calls[0]
+        assert len(blanks) == 19  # min(len(msg), 20-1) = 19
+
+
+# ---------------------------------------------------------------------------
+# Mouse diagnostic hint: integration with display loop
+# ---------------------------------------------------------------------------
+
+
+class TestMouseHintIntegration:
+    """Verify hint behavior in the display loop based on mouse_supported."""
+
+    def _run_loop_with_mouse_support(self, mouse_supported: bool) -> list[tuple[int, int, str]]:
+        """Run _display_loop and capture addstr calls from the screen.
+
+        Parameters
+        ----------
+        mouse_supported : bool
+            Whether to simulate mouse support being available.
+
+        Returns
+        -------
+        List of (y, x, text) tuples from addstr calls on the screen.
+        """
+        from globe_term.input import InputHandler
+
+        screen = _FakeScreen(40, 80)
+        screen.queue_keys(ord("q"))
+
+        addstr_calls: list[tuple[int, int, str]] = []
+        original_addstr = screen.addstr
+
+        def capturing_addstr(y: int, x: int, s: str, attrs: int = 0) -> None:
+            addstr_calls.append((y, x, s))
+            original_addstr(y, x, s, attrs)
+
+        screen.addstr = capturing_addstr  # type: ignore[assignment]
+
+        renderer_mock, cli_mock = _make_display_loop_mocks()
+        cli_mock.doupdate = mock.MagicMock()
+
+        original_init = InputHandler.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.mouse_supported = mouse_supported
+
+        with mock.patch("globe_term.renderer.curses", renderer_mock), \
+             mock.patch("globe_term.cli.curses", cli_mock), \
+             mock.patch.object(InputHandler, "__init__", patched_init):
+            _display_loop(screen)
+
+        return addstr_calls
+
+    def test_hint_shown_when_mouse_not_supported(self) -> None:
+        """When mouse_supported is False, the hint message appears on bottom row."""
+        calls = self._run_loop_with_mouse_support(False)
+        # Look for the hint message in any addstr call on the bottom row
+        hint_calls = [
+            (y, x, s) for y, x, s in calls
+            if y == 39 and MOUSE_HINT_MESSAGE in s
+        ]
+        assert len(hint_calls) >= 1, (
+            f"Expected hint on row 39 but got calls: "
+            f"{[(y, x, s[:30]) for y, x, s in calls if y == 39]}"
+        )
+
+    def test_hint_not_shown_when_mouse_supported(self) -> None:
+        """When mouse_supported is True, the hint message does NOT appear."""
+        calls = self._run_loop_with_mouse_support(True)
+        hint_calls = [
+            (y, x, s) for y, x, s in calls
+            if MOUSE_HINT_MESSAGE in s
+        ]
+        assert len(hint_calls) == 0, (
+            f"Hint should not appear when mouse is supported, "
+            f"but found: {hint_calls}"
+        )
+
+    def test_hint_constants_are_reasonable(self) -> None:
+        """Verify the hint constants have reasonable values."""
+        assert isinstance(MOUSE_HINT_MESSAGE, str)
+        assert len(MOUSE_HINT_MESSAGE) > 10
+        assert "arrow" in MOUSE_HINT_MESSAGE.lower() or "key" in MOUSE_HINT_MESSAGE.lower()
+        assert 1.0 <= MOUSE_HINT_DURATION <= 5.0

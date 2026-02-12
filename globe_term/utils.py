@@ -159,6 +159,45 @@ def detect_mouse_support() -> bool:
     return False
 
 
+def detect_terminal() -> str:
+    """Identify the terminal emulator in use.
+
+    Checks environment variables to determine which terminal emulator is
+    running.  This information is used downstream to select the correct
+    mouse-protocol negotiation strategy.
+
+    Detection order:
+    1. ``TERM_PROGRAM`` — set by most modern terminal emulators.
+    2. ``TERM`` — Kitty sets ``xterm-kitty`` even when ``TERM_PROGRAM``
+       is overridden (e.g. inside tmux).
+    3. ``WT_SESSION`` — Windows Terminal sets this unconditionally.
+
+    Returns:
+        One of ``"kitty"``, ``"iterm2"``, ``"apple_terminal"``,
+        ``"windows_terminal"``, or ``"unknown"``.
+    """
+    term_program = os.environ.get("TERM_PROGRAM", "").lower()
+
+    if term_program == "kitty":
+        return "kitty"
+    if term_program == "iterm.app":
+        return "iterm2"
+    if term_program == "apple_terminal":
+        return "apple_terminal"
+
+    # Kitty inside tmux: TERM_PROGRAM may be overridden, but TERM is
+    # still ``xterm-kitty``.
+    term = os.environ.get("TERM", "").lower()
+    if term == "xterm-kitty":
+        return "kitty"
+
+    # Windows Terminal always sets WT_SESSION.
+    if os.environ.get("WT_SESSION"):
+        return "windows_terminal"
+
+    return "unknown"
+
+
 def is_terminal() -> bool:
     """Check whether stdout is connected to a real terminal.
 

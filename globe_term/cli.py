@@ -98,6 +98,16 @@ KEY_ROTATION_STEP = math.radians(5)
 KEY_ZOOM_STEP = 0.15
 
 # ---------------------------------------------------------------------------
+# Mouse diagnostic hint
+# ---------------------------------------------------------------------------
+
+# Message shown briefly at startup when mouse support is not detected.
+MOUSE_HINT_MESSAGE = "Mouse not detected. Use arrow keys to rotate, +/- to zoom."
+
+# Duration (seconds) to display the mouse hint before clearing it.
+MOUSE_HINT_DURATION = 2.0
+
+# ---------------------------------------------------------------------------
 # Frame timing
 # ---------------------------------------------------------------------------
 
@@ -367,6 +377,64 @@ def _handle_resize(
     renderer.render_frame(points, adapter)
 
 
+def _show_mouse_hint(stdscr: Any, rows: int, cols: int) -> None:
+    """Display a mouse-not-detected hint on the bottom row of the screen.
+
+    The message is truncated to fit within the terminal width.  Any
+    rendering errors (e.g. terminal too small) are silently ignored so
+    the globe can still render.
+
+    Parameters
+    ----------
+    stdscr : curses window
+        The curses standard screen.
+    rows : int
+        Number of terminal rows.
+    cols : int
+        Number of terminal columns.
+    """
+    if rows < 1 or cols < 1:
+        return
+    msg = MOUSE_HINT_MESSAGE
+    # Truncate to fit the terminal width (leave 1 col for safety on last row)
+    max_len = max(0, cols - 1)
+    msg = msg[:max_len]
+    if not msg:
+        return
+    try:
+        stdscr.addstr(rows - 1, 0, msg)
+        stdscr.noutrefresh()
+        curses.doupdate()
+    except (curses.error, Exception):
+        # Silently ignore any rendering error — the globe must keep working.
+        pass
+
+
+def _clear_mouse_hint(stdscr: Any, rows: int, cols: int) -> None:
+    """Clear the mouse hint from the bottom row.
+
+    Parameters
+    ----------
+    stdscr : curses window
+        The curses standard screen.
+    rows : int
+        Number of terminal rows.
+    cols : int
+        Number of terminal columns.
+    """
+    if rows < 1 or cols < 1:
+        return
+    blank_len = min(len(MOUSE_HINT_MESSAGE), max(0, cols - 1))
+    if blank_len <= 0:
+        return
+    try:
+        stdscr.addstr(rows - 1, 0, " " * blank_len)
+        stdscr.noutrefresh()
+        curses.doupdate()
+    except (curses.error, Exception):
+        pass
+
+
 def _display_loop(stdscr: Any, config: Optional[CLIConfig] = None) -> None:
     """Main curses display loop.
 
@@ -432,6 +500,14 @@ def _display_loop(stdscr: Any, config: Optional[CLIConfig] = None) -> None:
     points = _build_projection(globe, width, height)
     renderer.render_frame(points, adapter)
 
+    # Mouse diagnostic hint: show briefly if mouse is not supported
+    hint_start: Optional[float] = None
+    hint_active = False
+    if not input_handler.mouse_supported:
+        hint_start = time.monotonic()
+        hint_active = True
+        _show_mouse_hint(stdscr, renderer.rows, renderer.cols)
+
     # Frame timing state
     prev_frame_time = time.monotonic()
 
@@ -460,27 +536,27 @@ def _display_loop(stdscr: Any, config: Optional[CLIConfig] = None) -> None:
             # --- Keyboard controls ---
             if key == curses.KEY_LEFT:
                 globe.rotate(-KEY_ROTATION_STEP, 0)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
             elif key == curses.KEY_RIGHT:
                 globe.rotate(KEY_ROTATION_STEP, 0)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
             elif key == curses.KEY_UP:
                 globe.rotate(0, -KEY_ROTATION_STEP)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
             elif key == curses.KEY_DOWN:
                 globe.rotate(0, KEY_ROTATION_STEP)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
             elif key in (ord("+"), ord("=")):
                 globe.adjust_zoom(KEY_ZOOM_STEP)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
             elif key in (ord("-"), ord("_")):
                 globe.adjust_zoom(-KEY_ZOOM_STEP)
-                input_handler._last_event_time = time.monotonic()
+                input_handler.reset_idle()
                 needs_redraw = True
 
             # Process mouse input events
@@ -510,6 +586,12 @@ def _display_loop(stdscr: Any, config: Optional[CLIConfig] = None) -> None:
                 height = renderer.rows
                 points = _build_projection(globe, width, height)
                 renderer.render_frame(points, adapter)
+
+            # --- Clear mouse hint after timeout ---
+            if hint_active and hint_start is not None:
+                if time.monotonic() - hint_start >= MOUSE_HINT_DURATION:
+                    _clear_mouse_hint(stdscr, renderer.rows, renderer.cols)
+                    hint_active = False
 
             # Flush any pending debounced resize
             if debouncer.flush():
